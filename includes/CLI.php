@@ -343,8 +343,14 @@ WP_CLI::add_command( 'wc generate products', array( 'WC\SmoothGenerator\CLI', 'p
 			'description' => 'Only apply existing categories and tags to products, rather than generating new ones.',
 			'optional'    => true,
 		),
+		array(
+			'name'        => 'industry',
+			'type'        => 'assoc',
+			'description' => 'Generate AI-backed fictional catalog content for an industry, for example food, fashion, or organic-skincare. Requires a configured WordPress AI connector.',
+			'optional'    => true,
+		),
 	),
-	'longdesc'  => "## EXAMPLES\n\nwc generate products 10\n\nwc generate products 20 --type=variable --use-existing-terms\n\nwc generate products 5 --type=booking\n\nwc generate products 5 --type=bookable-service\n\nwc generate products 5 --type=bookable-event",
+	'longdesc'  => "## EXAMPLES\n\nwc generate products 10\n\nwc generate products 20 --type=variable --use-existing-terms\n\nwc generate products 5 --industry=food\n\nwc generate products 5 --type=variable --industry=food\n\nwc generate products 5 --type=booking\n\nwc generate products 5 --type=bookable-service\n\nwc generate products 5 --type=bookable-event",
 ) );
 
 WP_CLI::add_command( 'wc generate orders', array( 'WC\SmoothGenerator\CLI', 'orders' ), array(

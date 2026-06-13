@@ -7,6 +7,7 @@
 
 namespace WC\SmoothGenerator\Generator;
 
+use WC\SmoothGenerator\AI\CatalogProvider;
 use WC\SmoothGenerator\Util\RandomRuntimeCache;
 
 /**
@@ -67,6 +68,20 @@ class Product extends Generator {
 	);
 
 	/**
+	 * Current AI catalog item being applied during batch generation.
+	 *
+	 * @var array|null
+	 */
+	protected static $current_ai_catalog_item = null;
+
+	/**
+	 * Whether AI catalog term assignment should only use existing terms.
+	 *
+	 * @var bool
+	 */
+	protected static $use_existing_ai_terms = false;
+
+	/**
 	 * Return a new product.
 	 *
 	 * @param bool  $save Save the object before returning or not.
@@ -106,11 +121,13 @@ class Product extends Generator {
 
 			// Assign brand terms using wp_set_object_terms, but only if the taxonomy exists.
 			if ( taxonomy_exists( 'product_brand' ) ) {
-				$brand_ids = self::get_term_ids( 'product_brand', self::$faker->numberBetween( 1, 3 ) );
-				if ( ! empty( $brand_ids ) ) {
-					$brand_result = wp_set_object_terms( $product->get_id(), $brand_ids, 'product_brand' );
-					if ( is_wp_error( $brand_result ) ) {
-						return $brand_result;
+				$catalog_item = self::get_ai_catalog_item();
+				$brand_ids    = $catalog_item ? self::get_catalog_term_ids( 'product_brand', $catalog_item['brands'] ) : self::get_term_ids( 'product_brand', self::$faker->numberBetween( 1, 3 ) );
+
+				if ( $brand_ids ) {
+					$result = wp_set_object_terms( $product->get_id(), $brand_ids, 'product_brand' );
+					if ( is_wp_error( $result ) ) {
+						return $result;
 					}
 				}
 			}
@@ -151,14 +168,43 @@ class Product extends Generator {
 		}
 
 		$use_existing_terms = ! empty( $args['use-existing-terms'] );
-		if ( ! $use_existing_terms ) {
+		$catalog            = array();
+
+		if ( ! empty( $args['industry'] ) && self::supports_ai_catalog_for_args( $args ) ) {
+			$catalog = CatalogProvider::generate_catalog(
+				(string) $args['industry'],
+				$amount,
+				array(
+					'type'               => $args['type'] ?? '',
+					'use-existing-terms' => $use_existing_terms,
+				)
+			);
+
+			if ( is_wp_error( $catalog ) ) {
+				return $catalog;
+			}
+
+			$args['__ai_catalog'] = $catalog;
+
+			if ( ! $use_existing_terms ) {
+				self::maybe_generate_ai_terms( $catalog );
+			}
+		} elseif ( ! $use_existing_terms ) {
 			self::maybe_generate_terms( $amount );
 		}
 
 		$product_ids = array();
 
 		for ( $i = 1; $i <= $amount; $i++ ) {
+			if ( ! empty( $catalog ) ) {
+				self::$current_ai_catalog_item = $catalog[ $i - 1 ];
+				self::$use_existing_ai_terms   = $use_existing_terms;
+			}
+
 			$product = self::generate( true, $args );
+
+			self::$current_ai_catalog_item = null;
+			self::$use_existing_ai_terms   = false;
 
 			// Skip products that failed to generate.
 			if ( is_wp_error( $product ) ) {
@@ -353,12 +399,13 @@ class Product extends Generator {
 	 * @return \WC_Product_Variable|\WP_Error Product object or WP_Error on failure.
 	 */
 	protected static function generate_variable_product() {
-		$name              = ucwords( self::$faker->productName );
+		$catalog_item      = self::get_ai_catalog_item();
+		$name              = $catalog_item ? $catalog_item['name'] : ucwords( self::$faker->productName );
 		$will_manage_stock = self::$faker->boolean();
 		$product           = new \WC_Product_Variable();
 
 		$gallery    = self::maybe_get_gallery_image_ids();
-		$attributes = self::generate_attributes( self::$faker->numberBetween( 1, 3 ), 5 );
+		$attributes = $catalog_item ? self::generate_ai_attributes( $catalog_item['attributes'], 5 ) : self::generate_attributes( self::$faker->numberBetween( 1, 3 ), 5 );
 
 		// Check if attribute generation failed.
 		if ( is_wp_error( $attributes ) ) {
@@ -380,9 +427,11 @@ class Product extends Generator {
 			'sold_individually' => self::$faker->boolean( 20 ),
 			'upsell_ids'        => self::get_existing_product_ids(),
 			'cross_sell_ids'    => self::get_existing_product_ids(),
-			'image_id'          => self::get_image(),
-			'category_ids'      => self::get_term_ids( 'product_cat', self::$faker->numberBetween( 0, 3 ) ),
-			'tag_ids'           => self::get_term_ids( 'product_tag', self::$faker->numberBetween( 0, 5 ) ),
+			'description'       => $catalog_item ? $catalog_item['description'] : '',
+			'short_description' => $catalog_item ? $catalog_item['short_description'] : '',
+			'image_id'          => self::get_product_image( $catalog_item ),
+			'category_ids'      => $catalog_item ? self::get_catalog_term_ids( 'product_cat', $catalog_item['categories'] ) : self::get_term_ids( 'product_cat', self::$faker->numberBetween( 0, 3 ) ),
+			'tag_ids'           => $catalog_item ? self::get_catalog_term_ids( 'product_tag', $catalog_item['tags'] ) : self::get_term_ids( 'product_tag', self::$faker->numberBetween( 0, 5 ) ),
 			'gallery_image_ids' => $gallery,
 			'reviews_allowed'   => self::$faker->boolean(),
 			'purchase_note'     => self::$faker->boolean() ? self::$faker->text() : '',
@@ -390,7 +439,6 @@ class Product extends Generator {
 		) );
 		// Need to save to get an ID for variations.
 		$product->save();
-
 		// Create variations, one for each attribute value combination.
 		$variation_attributes = wc_list_pluck( array_filter( $product->get_attributes(), 'wc_attributes_array_filter_variation' ), 'get_slugs' );
 		$possible_attributes  = array_reverse( wc_array_cartesian( $variation_attributes ) );
@@ -443,7 +491,8 @@ class Product extends Generator {
 	 * @return \WC_Product
 	 */
 	protected static function generate_simple_product() {
-		$name              = ucwords( self::$faker->productName );
+		$catalog_item      = self::get_ai_catalog_item();
+		$name              = $catalog_item ? $catalog_item['name'] : ucwords( self::$faker->productName );
 		$will_manage_stock = self::$faker->boolean();
 		$is_virtual        = self::$faker->boolean();
 		$price             = self::$faker->randomFloat( 2, 1, 1000 );
@@ -454,15 +503,15 @@ class Product extends Generator {
 		$date_on_sale_to   = $has_sale_schedule ? self::$faker->dateTimeBetween( '+4 days', '+4 months' )->format( DATE_ATOM ) : '';
 		$product           = new \WC_Product();
 
-		$image_id = self::get_image();
+		$image_id = self::get_product_image( $catalog_item );
 		$gallery  = self::maybe_get_gallery_image_ids();
 
 		$product->set_props( array(
 			'name'               => $name,
 			'featured'           => self::$faker->boolean(),
 			'catalog_visibility' => 'visible',
-			'description'        => self::$faker->paragraphs( self::$faker->numberBetween( 1, 5 ), true ),
-			'short_description'  => self::$faker->text(),
+			'description'        => $catalog_item ? $catalog_item['description'] : self::$faker->paragraphs( self::$faker->numberBetween( 1, 5 ), true ),
+			'short_description'  => $catalog_item ? $catalog_item['short_description'] : self::$faker->text(),
 			'sku'                => sanitize_title( $name ) . '-' . self::$faker->ean8,
 			'global_unique_id'   => self::$faker->randomElement( array( self::$faker->ean13, self::$faker->isbn10 ) ),
 			'regular_price'      => $price,
@@ -489,8 +538,8 @@ class Product extends Generator {
 			'menu_order'         => self::$faker->numberBetween( 0, 10000 ),
 			'virtual'            => $is_virtual,
 			'downloadable'       => false,
-			'category_ids'       => self::get_term_ids( 'product_cat', self::$faker->numberBetween( 0, 3 ) ),
-			'tag_ids'            => self::get_term_ids( 'product_tag', self::$faker->numberBetween( 0, 5 ) ),
+			'category_ids'       => $catalog_item ? self::get_catalog_term_ids( 'product_cat', $catalog_item['categories'] ) : self::get_term_ids( 'product_cat', self::$faker->numberBetween( 0, 3 ) ),
+			'tag_ids'            => $catalog_item ? self::get_catalog_term_ids( 'product_tag', $catalog_item['tags'] ) : self::get_term_ids( 'product_tag', self::$faker->numberBetween( 0, 5 ) ),
 			'shipping_class_id'  => 0,
 			'image_id'           => $image_id,
 			'gallery_image_ids'  => $gallery,
@@ -825,6 +874,71 @@ class Product extends Generator {
 	}
 
 	/**
+	 * Whether the current product batch should use AI catalog data.
+	 *
+	 * @param array $args CLI args.
+	 * @return bool
+	 */
+	protected static function supports_ai_catalog_for_args( array $args ): bool {
+		$type = $args['type'] ?? '';
+
+		return ! in_array( $type, array( 'booking', 'bookable-service', 'bookable-event' ), true );
+	}
+
+	/**
+	 * Get the AI catalog item assigned to the current product generation call.
+	 *
+	 * @return array|null
+	 */
+	protected static function get_ai_catalog_item() {
+		return self::$current_ai_catalog_item;
+	}
+
+	/**
+	 * Generate AI-provided terms before assigning them to products.
+	 *
+	 * @param array $catalog AI catalog items.
+	 * @return void
+	 */
+	protected static function maybe_generate_ai_terms( array $catalog ): void {
+		foreach ( $catalog as $item ) {
+			self::ensure_catalog_terms( 'product_cat', $item['categories'] ?? array() );
+			self::ensure_catalog_terms( 'product_tag', $item['tags'] ?? array() );
+
+			if ( taxonomy_exists( 'product_brand' ) ) {
+				self::ensure_catalog_terms( 'product_brand', $item['brands'] ?? array() );
+			}
+		}
+
+		RandomRuntimeCache::clear( 'product_cat' );
+		RandomRuntimeCache::clear( 'product_tag' );
+		RandomRuntimeCache::clear( 'product_brand' );
+	}
+
+	/**
+	 * Create missing catalog terms.
+	 *
+	 * @param string $taxonomy Taxonomy name.
+	 * @param array  $names    Term names.
+	 * @return void
+	 */
+	protected static function ensure_catalog_terms( string $taxonomy, array $names ): void {
+		if ( ! taxonomy_exists( $taxonomy ) ) {
+			return;
+		}
+
+		foreach ( $names as $name ) {
+			$name = sanitize_text_field( $name );
+
+			if ( '' === $name || term_exists( $name, $taxonomy ) ) {
+				continue;
+			}
+
+			wp_insert_term( $name, $taxonomy );
+		}
+	}
+
+	/**
 	 * Maybe generate a number of terms for use with products, if there aren't enough existing terms.
 	 *
 	 * Number of terms is determined by the number of products that will be generated.
@@ -908,6 +1022,98 @@ class Product extends Generator {
 		RandomRuntimeCache::shuffle( $taxonomy );
 
 		return RandomRuntimeCache::get( $taxonomy, $limit );
+	}
+
+	/**
+	 * Resolve catalog term names to term IDs.
+	 *
+	 * @param string $taxonomy Taxonomy name.
+	 * @param array  $names    Term names.
+	 * @return array
+	 */
+	protected static function get_catalog_term_ids( string $taxonomy, array $names ): array {
+		if ( ! taxonomy_exists( $taxonomy ) ) {
+			return array();
+		}
+
+		$term_ids = array();
+
+		foreach ( $names as $name ) {
+			$name = sanitize_text_field( $name );
+
+			if ( '' === $name ) {
+				continue;
+			}
+
+			$term = term_exists( $name, $taxonomy );
+
+			if ( ! $term && ! self::$use_existing_ai_terms ) {
+				$term = wp_insert_term( $name, $taxonomy );
+			}
+
+			if ( is_wp_error( $term ) || ! $term ) {
+				continue;
+			}
+
+			$term_ids[] = absint( is_array( $term ) ? $term['term_id'] : $term );
+		}
+
+		return array_values( array_unique( array_filter( $term_ids ) ) );
+	}
+
+	/**
+	 * Generate WooCommerce attributes from AI catalog data.
+	 *
+	 * @param array $ai_attributes AI attribute data.
+	 * @param int   $maximum_terms Maximum number of terms per attribute.
+	 * @return array|\WP_Error
+	 */
+	protected static function generate_ai_attributes( array $ai_attributes, int $maximum_terms = 5 ) {
+		$attributes = array();
+		$position   = 0;
+
+		foreach ( $ai_attributes as $ai_attribute ) {
+			if ( empty( $ai_attribute['name'] ) || empty( $ai_attribute['values'] ) || ! is_array( $ai_attribute['values'] ) ) {
+				continue;
+			}
+
+			$attribute = new \WC_Product_Attribute();
+			$attribute->set_id( 0 );
+			$attribute->set_position( $position );
+			$attribute->set_visible( true );
+			$attribute->set_variation( true );
+			$attribute->set_name( sanitize_text_field( $ai_attribute['name'] ) );
+			$attribute->set_options( array_slice( array_map( 'sanitize_text_field', $ai_attribute['values'] ), 0, $maximum_terms ) );
+
+			$attributes[] = $attribute;
+			++$position;
+		}
+
+		if ( ! $attributes ) {
+			return self::generate_attributes( 1, $maximum_terms );
+		}
+
+		return $attributes;
+	}
+
+	/**
+	 * Get an AI-generated product image, falling back to the local generator.
+	 *
+	 * @param array|null $catalog_item AI catalog item.
+	 * @return int
+	 */
+	protected static function get_product_image( $catalog_item = null ): int {
+		if ( ! $catalog_item || empty( $catalog_item['image_prompt'] ) ) {
+			return self::get_image();
+		}
+
+		$image_id = CatalogProvider::generate_image( $catalog_item['image_prompt'], $catalog_item );
+
+		if ( is_wp_error( $image_id ) || ! $image_id ) {
+			return self::get_image();
+		}
+
+		return absint( $image_id );
 	}
 
 	/**

@@ -1091,7 +1091,9 @@ class Product extends Generator {
 				continue;
 			}
 
-			$raw_name = sanitize_text_field( $ai_attribute['name'] );
+			$raw_name     = sanitize_text_field( $ai_attribute['name'] );
+			$values       = array_slice( array_map( 'sanitize_text_field', $ai_attribute['values'] ), 0, $maximum_terms );
+			$is_variation = ! empty( $ai_attribute['variation'] );
 
 			$attribute_labels = wp_list_pluck( wc_get_attribute_taxonomies(), 'attribute_label', 'attribute_name' );
 			$attribute_name   = array_search( $raw_name, $attribute_labels, true );
@@ -1105,15 +1107,26 @@ class Product extends Generator {
 			if ( ! $attribute_id ) {
 				$attribute_id = self::create_global_attribute( $raw_name );
 
+				// Long slugs (>= 28 chars) and other create failures fall back to a per-product custom attribute,
+				// so the product still saves instead of getting silently dropped by Product::batch().
 				if ( is_wp_error( $attribute_id ) ) {
-					return $attribute_id;
+					$attribute = new \WC_Product_Attribute();
+					$attribute->set_id( 0 );
+					$attribute->set_position( $position );
+					$attribute->set_visible( true );
+					$attribute->set_variation( $is_variation );
+					$attribute->set_name( $raw_name );
+					$attribute->set_options( $values );
+
+					$attributes[] = $attribute;
+					++$position;
+					continue;
 				}
 			}
 
-			$slug          = wc_sanitize_taxonomy_name( $raw_name );
-			$taxonomy_name = wc_attribute_taxonomy_name( $slug );
-
-			$values = array_slice( array_map( 'sanitize_text_field', $ai_attribute['values'] ), 0, $maximum_terms );
+			// Use the resolved slug ($attribute_name) so the taxonomy name matches existing custom-slug attributes
+			// (e.g. label "Color" with stored slug "colour") rather than re-sanitizing the label.
+			$taxonomy_name = wc_attribute_taxonomy_name( $attribute_name );
 
 			self::$global_attributes[ $raw_name ] = isset( self::$global_attributes[ $raw_name ] ) ? self::$global_attributes[ $raw_name ] : array();
 			foreach ( $values as $value ) {
@@ -1121,8 +1134,6 @@ class Product extends Generator {
 					self::$global_attributes[ $raw_name ][] = $value;
 				}
 			}
-
-			$is_variation = ! empty( $ai_attribute['variation'] );
 
 			$attribute = new \WC_Product_Attribute();
 			$attribute->set_id( $attribute_id );

@@ -7,6 +7,7 @@
 
 namespace WC\SmoothGenerator\Tests\Generator;
 
+use WC\SmoothGenerator\AI\CatalogProvider;
 use WC\SmoothGenerator\Generator\Product;
 use WP_UnitTestCase;
 
@@ -378,6 +379,124 @@ class ProductTest extends WP_UnitTestCase {
 	}
 
 	/**
+	 * Test valid AI catalog validation.
+	 */
+	public function test_ai_catalog_validation_accepts_valid_catalog() {
+		$catalog = CatalogProvider::validate_catalog_response( $this->get_ai_catalog_fixture( 1 ), 1 );
+
+		$this->assertIsArray( $catalog );
+		$this->assertCount( 1, $catalog );
+		$this->assertEquals( 'Citrus Oat Breakfast Clusters 1', $catalog[0]['name'] );
+	}
+
+	/**
+	 * Test malformed AI catalog JSON is rejected.
+	 */
+	public function test_ai_catalog_validation_rejects_malformed_json() {
+		$result = CatalogProvider::validate_catalog_response( '{"products": [', 1 );
+
+		$this->assertWPError( $result );
+		$this->assertEquals( 'smoothgenerator_ai_malformed_json', $result->get_error_code() );
+	}
+
+	/**
+	 * Test missing AI catalog fields are rejected.
+	 */
+	public function test_ai_catalog_validation_rejects_missing_fields() {
+		$result = CatalogProvider::validate_catalog_response(
+			array(
+				'products' => array(
+					array(
+						'name' => 'Incomplete Product',
+					),
+				),
+			),
+			1
+		);
+
+		$this->assertWPError( $result );
+		$this->assertEquals( 'smoothgenerator_ai_invalid_catalog', $result->get_error_code() );
+	}
+
+	/**
+	 * Test industry generation fails clearly without an AI connector.
+	 */
+	public function test_industry_generation_without_ai_connector_returns_error() {
+		$result = Product::batch( 1, array(
+			'type'     => 'simple',
+			'industry' => 'food',
+		) );
+
+		$this->assertWPError( $result );
+		$this->assertEquals( 'smoothgenerator_ai_unavailable', $result->get_error_code() );
+	}
+
+	/**
+	 * Test mocked AI catalog data is applied to simple products.
+	 */
+	public function test_industry_generation_applies_ai_catalog_to_simple_products() {
+		add_filter( 'smoothgenerator_ai_catalog_response', array( $this, 'filter_ai_catalog_response' ), 10, 4 );
+
+		$product_ids = Product::batch( 1, array(
+			'type'     => 'simple',
+			'industry' => 'food',
+		) );
+
+		remove_filter( 'smoothgenerator_ai_catalog_response', array( $this, 'filter_ai_catalog_response' ), 10 );
+
+		$this->assertIsArray( $product_ids );
+		$product = wc_get_product( $product_ids[0] );
+
+		$this->assertEquals( 'Citrus Oat Breakfast Clusters 1', $product->get_name() );
+		$this->assertStringContainsString( 'small-batch breakfast clusters', $product->get_description() );
+		$this->assertNotEmpty( $product->get_category_ids() );
+		$this->assertNotEmpty( $product->get_tag_ids() );
+	}
+
+	/**
+	 * Test mocked AI catalog data is applied to variable products.
+	 */
+	public function test_industry_generation_applies_ai_catalog_to_variable_products() {
+		add_filter( 'smoothgenerator_ai_catalog_response', array( $this, 'filter_ai_catalog_response' ), 10, 4 );
+
+		$product_ids = Product::batch( 1, array(
+			'type'     => 'variable',
+			'industry' => 'food',
+		) );
+
+		remove_filter( 'smoothgenerator_ai_catalog_response', array( $this, 'filter_ai_catalog_response' ), 10 );
+
+		$this->assertIsArray( $product_ids );
+		$product = wc_get_product( $product_ids[0] );
+
+		$this->assertInstanceOf( \WC_Product_Variable::class, $product );
+		$this->assertEquals( 'Citrus Oat Breakfast Clusters 1', $product->get_name() );
+		$this->assertNotEmpty( $product->get_attributes() );
+	}
+
+	/**
+	 * Test use-existing-terms prevents AI term creation.
+	 */
+	public function test_industry_generation_with_existing_terms_does_not_create_ai_terms() {
+		wp_insert_term( 'Pantry', 'product_cat' );
+		wp_insert_term( 'Breakfast', 'product_tag' );
+
+		add_filter( 'smoothgenerator_ai_catalog_response', array( $this, 'filter_ai_catalog_response' ), 10, 4 );
+
+		$product_ids = Product::batch( 1, array(
+			'type'               => 'simple',
+			'industry'           => 'food',
+			'use-existing-terms' => true,
+		) );
+
+		remove_filter( 'smoothgenerator_ai_catalog_response', array( $this, 'filter_ai_catalog_response' ), 10 );
+
+		$this->assertIsArray( $product_ids );
+		$this->assertEmpty( term_exists( 'Breakfast Foods', 'product_cat' ) );
+		$this->assertEmpty( term_exists( 'High Fiber', 'product_tag' ) );
+	}
+
+	/**
 	 * Test variation sale prices.
 	 */
 	public function test_variation_sale_prices() {
@@ -489,5 +608,52 @@ class ProductTest extends WP_UnitTestCase {
 		// Should have no brand terms.
 		$brand_terms = wp_get_object_terms( $product->get_id(), 'product_brand' );
 		$this->assertTrue( is_wp_error( $brand_terms ) || empty( $brand_terms ) );
+	}
+
+	/**
+	 * Mock AI catalog response.
+	 *
+	 * @param mixed  $response Existing response.
+	 * @param string $industry Industry.
+	 * @param int    $amount   Amount.
+	 * @param array  $context  Context.
+	 * @return array
+	 */
+	public function filter_ai_catalog_response( $response, $industry, $amount, $context ) {
+		return $this->get_ai_catalog_fixture( $amount );
+	}
+
+	/**
+	 * Get an AI catalog fixture.
+	 *
+	 * @param int $amount Number of products.
+	 * @return array
+	 */
+	private function get_ai_catalog_fixture( int $amount ): array {
+		$products = array();
+
+		for ( $i = 1; $i <= $amount; $i++ ) {
+			$products[] = array(
+				'name'              => 'Citrus Oat Breakfast Clusters ' . $i,
+				'description'       => 'Fictional small-batch breakfast clusters with orange zest, toasted oats, and a crisp bite.',
+				'short_description' => 'Bright oat clusters for everyday breakfast.',
+				'categories'        => array( 'Pantry', 'Breakfast Foods' ),
+				'tags'              => array( 'Breakfast', 'High Fiber' ),
+				'brands'            => array( 'North Orchard Foods' ),
+				'attributes'        => array(
+					array(
+						'name'   => 'Flavor',
+						'values' => array( 'Citrus', 'Honey' ),
+					),
+					array(
+						'name'   => 'Pack Size',
+						'values' => array( 'Single Box', 'Family Pack' ),
+					),
+				),
+				'image_prompt'      => 'A realistic package of citrus oat breakfast clusters on a kitchen counter.',
+			);
+		}
+
+		return array( 'products' => $products );
 	}
 }

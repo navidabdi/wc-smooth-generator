@@ -405,11 +405,25 @@ class Product extends Generator {
 		$product           = new \WC_Product_Variable();
 
 		$gallery    = self::maybe_get_gallery_image_ids();
-		$attributes = $catalog_item ? self::generate_ai_attributes( $catalog_item['attributes'], 5 ) : self::generate_attributes( self::$faker->numberBetween( 1, 3 ), 5 );
+		$attributes = $catalog_item ? self::generate_ai_attributes( $catalog_item['attributes'], 8 ) : self::generate_attributes( self::$faker->numberBetween( 1, 3 ), 5 );
 
 		// Check if attribute generation failed.
 		if ( is_wp_error( $attributes ) ) {
 			return $attributes;
+		}
+
+		// Ensure at least one attribute drives variations so a variable product gets generated.
+		if ( $catalog_item ) {
+			$has_variation_axis = false;
+			foreach ( $attributes as $attribute ) {
+				if ( $attribute->get_variation() ) {
+					$has_variation_axis = true;
+					break;
+				}
+			}
+			if ( ! $has_variation_axis && ! empty( $attributes ) ) {
+				$attributes[0]->set_variation( true );
+			}
 		}
 
 		$product->set_props( array(
@@ -1068,7 +1082,7 @@ class Product extends Generator {
 	 * @param int   $maximum_terms Maximum number of terms per attribute.
 	 * @return array|\WP_Error
 	 */
-	protected static function generate_ai_attributes( array $ai_attributes, int $maximum_terms = 5 ) {
+	protected static function generate_ai_attributes( array $ai_attributes, int $maximum_terms = 8 ) {
 		$attributes = array();
 		$position   = 0;
 
@@ -1077,13 +1091,46 @@ class Product extends Generator {
 				continue;
 			}
 
+			$raw_name = sanitize_text_field( $ai_attribute['name'] );
+
+			$attribute_labels = wp_list_pluck( wc_get_attribute_taxonomies(), 'attribute_label', 'attribute_name' );
+			$attribute_name   = array_search( $raw_name, $attribute_labels, true );
+
+			if ( ! $attribute_name ) {
+				$attribute_name = wc_sanitize_taxonomy_name( $raw_name );
+			}
+
+			$attribute_id = wc_attribute_taxonomy_id_by_name( $attribute_name );
+
+			if ( ! $attribute_id ) {
+				$attribute_id = self::create_global_attribute( $raw_name );
+
+				if ( is_wp_error( $attribute_id ) ) {
+					return $attribute_id;
+				}
+			}
+
+			$slug          = wc_sanitize_taxonomy_name( $raw_name );
+			$taxonomy_name = wc_attribute_taxonomy_name( $slug );
+
+			$values = array_slice( array_map( 'sanitize_text_field', $ai_attribute['values'] ), 0, $maximum_terms );
+
+			self::$global_attributes[ $raw_name ] = isset( self::$global_attributes[ $raw_name ] ) ? self::$global_attributes[ $raw_name ] : array();
+			foreach ( $values as $value ) {
+				if ( ! in_array( $value, self::$global_attributes[ $raw_name ], true ) ) {
+					self::$global_attributes[ $raw_name ][] = $value;
+				}
+			}
+
+			$is_variation = ! empty( $ai_attribute['variation'] );
+
 			$attribute = new \WC_Product_Attribute();
-			$attribute->set_id( 0 );
+			$attribute->set_id( $attribute_id );
 			$attribute->set_position( $position );
 			$attribute->set_visible( true );
-			$attribute->set_variation( true );
-			$attribute->set_name( sanitize_text_field( $ai_attribute['name'] ) );
-			$attribute->set_options( array_slice( array_map( 'sanitize_text_field', $ai_attribute['values'] ), 0, $maximum_terms ) );
+			$attribute->set_variation( $is_variation );
+			$attribute->set_name( $taxonomy_name );
+			$attribute->set_options( $values );
 
 			$attributes[] = $attribute;
 			++$position;

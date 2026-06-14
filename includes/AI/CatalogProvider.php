@@ -250,7 +250,19 @@ class CatalogProvider {
 		$type = isset( $context['type'] ) ? sanitize_text_field( (string) $context['type'] ) : 'simple or variable';
 
 		return sprintf(
-			'Generate %1$d fictional but realistic WooCommerce catalog products for the "%2$s" industry. Product type context: %3$s. Return only valid JSON with a top-level "products" array. Each product must include: name, description, short_description, categories array, tags array, brands array, attributes array of objects with name and values array, and image_prompt. Use plausible fictional brands only. Do not include real product names, markdown, comments, or pricing.',
+			'Generate %1$d fictional but realistic WooCommerce catalog products for the "%2$s" industry. Product type context: %3$s.'
+			. ' For each product, choose 4-10 attributes that are SPECIFIC and RELEVANT to that exact product type.'
+			. ' Do not reuse the same attribute set across unrelated products. Examples of relevant attributes per category:'
+			. ' Clothing/Apparel: Material, Fit, Sleeve Length, Closure, Care Instructions, Size, Color, Pattern.'
+			. ' Footwear: Material, Sole, Closure, Heel Height, Width, Size, Color.'
+			. ' Electronics/Cables: Connector A, Connector B, Length, Data Rate, Shielding, Color.'
+			. ' Beverages/Food: Flavor, Volume, Ingredients, Dietary, Packaging.'
+			. ' Furniture: Material, Dimensions, Finish, Assembly, Weight Capacity.'
+			. ' Beauty/Cosmetics: Skin Type, Volume, Finish, Shade, Ingredients.'
+			. ' Mark 1-2 attributes per product as variation axes (typically Size/Color/Length/Volume) by setting "variation": true.'
+			. ' Mark descriptive attributes (Material, Care, Ingredients, etc.) as "variation": false.'
+			. ' Return only valid JSON with a top-level "products" array. Each product must include: name, description, short_description, categories array, tags array, brands array, attributes array of objects with name, values array, and variation boolean, and image_prompt.'
+			. ' Use plausible fictional brands only. Do not include real product names, markdown, comments, or pricing.',
 			$amount,
 			$industry,
 			$type
@@ -303,13 +315,19 @@ class CatalogProvider {
 			$values = self::normalize_string_list( $attribute['values'] );
 
 			if ( '' !== $name && $values ) {
+				$variation = false;
+				if ( array_key_exists( 'variation', $attribute ) ) {
+					$variation = filter_var( $attribute['variation'], FILTER_VALIDATE_BOOLEAN );
+				}
+
 				$normalized[] = array(
-					'name'   => $name,
-					'values' => $values,
+					'name'      => $name,
+					'values'    => $values,
+					'variation' => $variation,
 				);
 			}
 		}
 
-		return array_slice( $normalized, 0, 5 );
+		return array_slice( $normalized, 0, 10 );
 	}
 }

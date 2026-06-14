@@ -328,6 +328,24 @@ class CatalogProvider {
 			}
 		}
 
-		return array_slice( $normalized, 0, 10 );
+		$normalized = array_slice( $normalized, 0, 10 );
+
+		// Cap variation axes regardless of how many the AI marked. The variable-product
+		// generator builds a Cartesian product of variation values, so 10 axes * 8 values
+		// would attempt 8^10 (~1B) combinations and exhaust memory.
+		$variation_axes_remaining = 2;
+		foreach ( $normalized as &$attribute ) {
+			if ( ! $attribute['variation'] ) {
+				continue;
+			}
+			if ( $variation_axes_remaining > 0 ) {
+				--$variation_axes_remaining;
+			} else {
+				$attribute['variation'] = false;
+			}
+		}
+		unset( $attribute );
+
+		return $normalized;
 	}
 }

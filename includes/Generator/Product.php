@@ -520,6 +520,11 @@ class Product extends Generator {
 		$image_id = self::get_product_image( $catalog_item );
 		$gallery  = self::maybe_get_gallery_image_ids();
 
+		$attributes = $catalog_item ? self::generate_ai_attributes( $catalog_item['attributes'], 8 ) : array();
+		if ( is_wp_error( $attributes ) ) {
+			return $attributes;
+		}
+
 		$product->set_props( array(
 			'name'               => $name,
 			'featured'           => self::$faker->boolean(),
@@ -528,6 +533,7 @@ class Product extends Generator {
 			'short_description'  => $catalog_item ? $catalog_item['short_description'] : self::$faker->text(),
 			'sku'                => sanitize_title( $name ) . '-' . self::$faker->ean8,
 			'global_unique_id'   => self::$faker->randomElement( array( self::$faker->ean13, self::$faker->isbn10 ) ),
+			'attributes'         => $attributes,
 			'regular_price'      => $price,
 			'sale_price'         => $sale_price,
 			'date_on_sale_from'  => $date_on_sale_from,
